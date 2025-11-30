@@ -1,30 +1,35 @@
+// src/scan.rs
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-
-use humansize::{file_size_opts as options, FileSize};
-use rayon::prelude::*;
 use walkdir::WalkDir;
+use humansize::{file_size_opts as options, FileSize};
 
-/// Struktur data hasil scan (immutable fields)
-#[derive(Clone)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FileEntry {
+    pub path: String,
+    pub size: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FolderStats {
     pub total_size: u64,
     pub total_files: usize,
-    pub extension_count: Vec<(String, usize)>, // (ext, count)
-    pub filtered_files: Vec<(PathBuf, u64)>,   // (path, size)
+    pub extension_count: Vec<(String, usize)>,
+    pub filtered_files: Vec<FileEntry>,
 }
 
-/// Helper: konversi pilihan teks ke bytes
+/// parsing filter text -> bytes
 pub fn parse_filter_option(opt: &str, custom_text: Option<&str>) -> u64 {
     match opt {
-        "> 100 MB" => 100 * 1024 * 1024,
-        "> 500 MB" => 500 * 1024 * 1024,
-        "> 1 GB" => 1 * 1024 * 1024 * 1024,
-        "> 5 GB" => 5 * 1024 * 1024 * 1024,
+        "100 MB" => 100 * 1024 * 1024,
+        "500 MB" => 500 * 1024 * 1024,
+        "1 GB" => 1 * 1024 * 1024 * 1024,
+        "5 GB" => 5 * 1024 * 1024 * 1024,
         "Custom" => {
             if let Some(s) = custom_text {
-                // expect format like "150 MB" or "1.5 GB" or just number in MB
                 parse_human_input_to_bytes(s).unwrap_or(0)
             } else {
                 0
@@ -34,7 +39,6 @@ pub fn parse_filter_option(opt: &str, custom_text: Option<&str>) -> u64 {
     }
 }
 
-/// Parse simple human input (very forgiving): "150", "150 MB", "1.2 GB"
 pub fn parse_human_input_to_bytes(s: &str) -> Option<u64> {
     let s = s.trim().to_uppercase();
     if s.is_empty() {
@@ -42,9 +46,8 @@ pub fn parse_human_input_to_bytes(s: &str) -> Option<u64> {
     }
     let parts: Vec<&str> = s.split_whitespace().collect();
     if parts.len() == 1 {
-        // maybe "150" assume MB
         if let Ok(n) = parts[0].parse::<f64>() {
-            return Some((n * 1024.0 * 1024.0) as u64);
+            return Some((n * 1024.0 * 1024.0) as u64); // assume MB
         }
     } else if let Ok(value) = parts[0].parse::<f64>() {
         let unit = parts[1];
@@ -59,9 +62,10 @@ pub fn parse_human_input_to_bytes(s: &str) -> Option<u64> {
     None
 }
 
-/// Scan folder: tanpa variabel mutable yang terlihat di logic utama (menggunakan iterator + rayon)
+/// scan_folder: returns FolderStats
+/// - uses parallel iterators (rayon)
+/// - minimal mutable: local fold usage (safe)
 pub fn scan_folder(path: &PathBuf, min_size_bytes: u64) -> Result<FolderStats, String> {
-    // Kumpulkan semua file paths (ignores errors for individual entries)
     let paths: Vec<PathBuf> = WalkDir::new(path)
         .into_iter()
         .filter_map(|e| e.ok())
@@ -69,16 +73,14 @@ pub fn scan_folder(path: &PathBuf, min_size_bytes: u64) -> Result<FolderStats, S
         .map(|e| e.into_path())
         .collect();
 
-    // Total size: parallel sum
     let total_size: u64 = paths
         .par_iter()
         .map(|p| fs::metadata(p).map(|m| m.len()).unwrap_or(0))
         .sum();
 
-    // Total files
     let total_files = paths.len();
 
-    // Count extensions: parallel folding into HashMap then merge
+    // count extensions via parallel fold + reduce
     let ext_map: HashMap<String, usize> = paths
         .par_iter()
         .map(|p| {
@@ -104,15 +106,18 @@ pub fn scan_folder(path: &PathBuf, min_size_bytes: u64) -> Result<FolderStats, S
             },
         );
 
-    // Convert ext_map to sorted Vec<(ext, count)>
     let mut extension_count: Vec<(String, usize)> = ext_map.into_iter().collect();
-    extension_count.sort_by(|a, b| b.1.cmp(&a.1)); // descending by count
+    extension_count.sort_by(|a, b| b.1.cmp(&a.1));
 
-    // Filter files by size (>= min_size_bytes)
-    let filtered_files: Vec<(PathBuf, u64)> = paths
+    // filtered files -> FileEntry
+    let filtered_files: Vec<FileEntry> = paths
         .par_iter()
         .filter_map(|p| fs::metadata(p).ok().map(|m| (p.clone(), m.len())))
         .filter(|(_, sz)| *sz >= min_size_bytes)
+        .map(|(p, sz)| FileEntry {
+            path: p.to_string_lossy().into_owned(),
+            size: sz,
+        })
         .collect();
 
     Ok(FolderStats {
@@ -123,6 +128,7 @@ pub fn scan_folder(path: &PathBuf, min_size_bytes: u64) -> Result<FolderStats, S
     })
 }
 
+/// helper format human readable
 pub fn format_bytes(bytes: u64) -> String {
     bytes
         .file_size(options::CONVENTIONAL)
