@@ -1,4 +1,3 @@
-// src/scan.rs
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

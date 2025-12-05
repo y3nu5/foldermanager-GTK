@@ -1,4 +1,5 @@
 // src/ui.rs
+
 use gtk4::gdk;
 use gtk4::prelude::*;
 use gtk4::{
@@ -136,6 +137,7 @@ struct KomponenUI {
     entry_path: Entry,
     filter_combo: ComboBoxText,
     custom_entry: Entry,
+    calc_btn: Button,  // ✅ DITAMBAHKAN
     spinner: Spinner,
     total_label: Label,
     count_label: Label,
@@ -222,7 +224,7 @@ fn buat_komponen_ui(window: &ApplicationWindow) -> KomponenUI {
     root.append(&buat_row_horizontal_box(
         vec![
             entry_path.clone().upcast(),
-            choose_btn.upcast(),
+            choose_btn.clone().upcast(),  // ✅ DITAMBAHKAN .clone()
             filter_combo.clone().upcast(),
             custom_entry.clone().upcast(),
             calc_btn.clone().upcast(),
@@ -251,6 +253,7 @@ fn buat_komponen_ui(window: &ApplicationWindow) -> KomponenUI {
         entry_path,
         filter_combo,
         custom_entry,
+        calc_btn,  // ✅ DITAMBAHKAN
         spinner,
         total_label,
         count_label,
@@ -429,7 +432,7 @@ fn setup_file_chooser(choose_btn: &Button, entry_path: &Entry) {
         let entry_inner = entry_clone.clone();
 
         file_chooser.connect_response(move |dialog, response| {
-            handle_file_chooser_response(&dialog, response, &entry_inner);
+            handle_file_chooser_response(dialog, response, &entry_inner);
             dialog.destroy();
         });
 
@@ -612,26 +615,30 @@ fn populate_extension_list(ext_list: &ListBox, extension_count: Vec<(String, usi
 // ================================================================
 // POPULATE FILE LIST
 // ================================================================
-fn populate_file_list(file_list: &ListBox, filtered_files: Vecrate::scan::FileEntry>) {
+fn populate_file_list(
+    file_list: &ListBox,
+    filtered_files: Vec<crate::scan::FileEntry>,  // ✅ DIPERBAIKI: Tambahkan <
+) {
     let files_terurut = urutkan_files_by_size(filtered_files);
 
-    files_terurut.into_iter().for_each(|file_entry| {
+    for file_entry in files_terurut {
         let row = buat_list_row(&format!(
             "{} ({})",
             file_entry.path,
             format_bytes(file_entry.size)
         ));
         file_list.append(&row);
-    });
+    }
 }
 
 // ================================================================
 // URUTKAN FILES BERDASARKAN SIZE (DESCENDING)
 // ================================================================
-fn urutkan_files_by_size(files: Vecrate::scan::FileEntry>) -> Vecrate::scan::FileEntry> {
-    let mut files_sorted = files;
-    files_sorted.sort_by(|a, b| b.size.cmp(&a.size));
-    files_sorted
+fn urutkan_files_by_size(
+    mut files: Vec<crate::scan::FileEntry>,  // ✅ DIPERBAIKI: Tambahkan <
+) -> Vec<crate::scan::FileEntry> {          // ✅ DIPERBAIKI: Tambahkan <
+    files.sort_by(|a, b| b.size.cmp(&a.size));
+    files
 }
 
 // ================================================================
@@ -659,7 +666,8 @@ fn setup_button_hitung(
     let total_label = komponen.total_label.clone();
     let count_label = komponen.count_label.clone();
 
-    let _calc_btn = buat_button_dengan_event("Hitung", move || {
+    // ✅ GUNAKAN calc_btn dari komponen langsung
+    komponen.calc_btn.connect_clicked(move |_| {
         handle_button_hitung_click(
             &entry_path,
             &filter_combo,
@@ -670,21 +678,6 @@ fn setup_button_hitung(
             &pengirim_channel,
         );
     });
-
-    // Catatan: button "Hitung" asli dibuat di buat_control_row dan dipasang ke UI.
-    // Di sini kita hanya menghubungkan handler baru berbasis clone.
-}
-
-// ================================================================
-// BUAT BUTTON DENGAN EVENT HANDLER
-// ================================================================
-fn buat_button_dengan_event<F>(label: &str, handler: F) -> Button
-where
-    F: Fn() + 'static,
-{
-    let button = Button::with_label(label);
-    button.connect_clicked(move |_| handler());
-    button
 }
 
 // ================================================================
