@@ -16,50 +16,253 @@ use std::thread;
 use std::time::Duration;
 
 use crate::ipc;
-use crate::scan::{FolderStats, format_bytes, parse_filter_option};
+use crate::scan::{format_bytes, parse_filter_option, FolderStats};
 
-// --------------------------
-// Helper: ambil semua child listbox
-// --------------------------
-fn listbox_children(lb: &ListBox) -> Vec<Widget> {
-    let mut out = Vec::new();
-    let mut current = lb.first_child();
-
-    while let Some(w) = current {
-        out.push(w.clone());
-        current = w.next_sibling();
-    }
-    out
+// ================================================================
+// ENUM UNTUK OPSI FILTER UKURAN FILE
+// ================================================================
+#[derive(Debug, Clone, Copy)]
+enum OpsiFilterUkuran {
+    SeratusMB,
+    LimaRatusMB,
+    SatuGB,
+    LimaGB,
+    Custom,
 }
 
-// --------------------------
-// Membangun UI utama aplikasi
-// --------------------------
+impl OpsiFilterUkuran {
+    /// Konversi enum ke string untuk ditampilkan di UI
+    fn ke_string(&self) -> &'static str {
+        match self {
+            OpsiFilterUkuran::SeratusMB => "100 MB",
+            OpsiFilterUkuran::LimaRatusMB => "500 MB",
+            OpsiFilterUkuran::SatuGB => "1 GB",
+            OpsiFilterUkuran::LimaGB => "5 GB",
+            OpsiFilterUkuran::Custom => "Custom",
+        }
+    }
+
+    /// Dapatkan semua opsi filter yang tersedia
+    fn semua_opsi() -> Vec<OpsiFilterUkuran> {
+        vec![
+            OpsiFilterUkuran::SeratusMB,
+            OpsiFilterUkuran::LimaRatusMB,
+            OpsiFilterUkuran::SatuGB,
+            OpsiFilterUkuran::LimaGB,
+            OpsiFilterUkuran::Custom,
+        ]
+    }
+
+    /// Parse string menjadi enum OpsiFilterUkuran
+    fn dari_string(text: &str) -> Option<OpsiFilterUkuran> {
+        OpsiFilterUkuran::semua_opsi()
+            .into_iter()
+            .find(|opsi| opsi.ke_string() == text)
+    }
+
+    /// Cek apakah opsi adalah Custom
+    fn adalah_custom(&self) -> bool {
+        matches!(self, OpsiFilterUkuran::Custom)
+    }
+
+    /// Hitung minimum bytes berdasarkan enum.
+    /// Untuk opsi bawaan (100MB, 500MB, dst) langsung dihitung dari enum.
+    /// Untuk Custom, nilai diambil dari input user dan diparse oleh parse_filter_option.
+    fn ke_minimum_bytes(&self, custom_text: Option<&str>) -> u64 {
+        match self {
+            OpsiFilterUkuran::SeratusMB => 100 * 1024 * 1024,
+            OpsiFilterUkuran::LimaRatusMB => 500 * 1024 * 1024,
+            OpsiFilterUkuran::SatuGB => 1 * 1024 * 1024 * 1024,
+            OpsiFilterUkuran::LimaGB => 5 * 1024 * 1024 * 1024,
+            OpsiFilterUkuran::Custom => {
+                let text = custom_text.unwrap_or("").trim();
+                // Reuse fungsi parse_filter_option dari crate::scan
+                parse_filter_option("Custom", Some(text))
+            }
+        }
+    }
+}
+
+// ================================================================
+// ENUM UNTUK STATUS VALIDASI PATH
+// ================================================================
+#[derive(Debug)]
+enum StatusValidasiPath {
+    Valid(PathBuf),
+    Kosong,
+    TidakValid,
+}
+
+impl StatusValidasiPath {
+    /// Validasi path dari string input
+    fn validasi(text_path: &str) -> StatusValidasiPath {
+        let path_bersih = text_path.trim();
+
+        match path_bersih.is_empty() {
+            true => StatusValidasiPath::Kosong,
+            false => {
+                let path_buffer = PathBuf::from(path_bersih);
+                match path_buffer.exists() && path_buffer.is_dir() {
+                    true => StatusValidasiPath::Valid(path_buffer),
+                    false => StatusValidasiPath::TidakValid,
+                }
+            }
+        }
+    }
+
+    /// Ekstrak PathBuf jika valid
+    fn ambil_path(self) -> Option<PathBuf> {
+        match self {
+            StatusValidasiPath::Valid(path) => Some(path),
+            _ => None,
+        }
+    }
+
+    /// Dapatkan pesan error untuk status tidak valid
+    fn pesan_error(&self) -> Option<&'static str> {
+        match self {
+            StatusValidasiPath::Kosong => Some("(masukkan path dulu)"),
+            StatusValidasiPath::TidakValid => Some("(path tidak valid)"),
+            StatusValidasiPath::Valid(_) => None,
+        }
+    }
+}
+
+// ================================================================
+// STRUCT UNTUK UI COMPONENTS
+// ================================================================
+struct KomponenUI {
+    window: ApplicationWindow,
+    entry_path: Entry,
+    filter_combo: ComboBoxText,
+    custom_entry: Entry,
+    spinner: Spinner,
+    total_label: Label,
+    count_label: Label,
+    ext_list: ListBox,
+    file_list: ListBox,
+}
+
+// ================================================================
+// HELPER: Ambil semua child dari ListBox
+// ================================================================
+fn ambil_semua_child_listbox(list_box: &ListBox) -> Vec<Widget> {
+    std::iter::successors(list_box.first_child(), |widget| widget.next_sibling()).collect()
+}
+
+// ================================================================
+// MEMBANGUN UI UTAMA APLIKASI
+// ================================================================
 pub fn build_ui(app: &Application) {
-    // ============ WINDOW ===============
+    let window = buat_window_utama(app);
+    let komponen = buat_komponen_ui(&window);
+
+    setup_event_handlers(&komponen);
+
+    komponen.window.show();
+}
+
+// ================================================================
+// FUNGSI UNTUK MEMBUAT WINDOW UTAMA
+// ================================================================
+fn buat_window_utama(app: &Application) -> ApplicationWindow {
     let window = ApplicationWindow::new(app);
     window.set_title(Some("fscan - Folder Stats"));
     window.set_default_size(1000, 700);
 
-    // CSS sederhana
+    terapkan_css_styling();
+
+    window
+}
+
+// ================================================================
+// FUNGSI UNTUK MENERAPKAN CSS STYLING
+// ================================================================
+fn terapkan_css_styling() {
     let provider = CssProvider::new();
     provider.load_from_data(
         r#"
-    window { background-color: #fafafa; }
-    box.card { background-color: #fff; border-radius: 8px; padding: 8px; }
-    button.suggested-action { background-color: #f97316; color: #fff; }
-"#,
+        window { background-color: #fafafa; }
+        box.card { background-color: #fff; border-radius: 8px; padding: 8px; }
+        button.suggested-action { background-color: #f97316; color: #fff; }
+        "#,
     );
 
-    if let Some(display) = gdk::Display::default() {
+    gdk::Display::default().map(|display| {
         gtk4::style_context_add_provider_for_display(
             &display,
             &provider,
             gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
-    }
+        )
+    });
+}
 
-    // ============ HEADER BAR ============
+// ================================================================
+// FUNGSI UNTUK MEMBUAT SEMUA KOMPONEN UI
+// ================================================================
+fn buat_komponen_ui(window: &ApplicationWindow) -> KomponenUI {
+    // Buat header bar dengan tombol fullscreen
+    let header = buat_header_bar(window);
+    window.set_titlebar(Some(&header));
+
+    // Buat root container
+    let root = buat_root_container();
+
+    // Buat komponen control row
+    let (entry_path, choose_btn, filter_combo, custom_entry, calc_btn, spinner) =
+        buat_control_row();
+
+    // Buat info bar
+    let (total_label, count_label) = buat_info_bar();
+
+    // Buat split panel dengan extension list dan file list
+    let (ext_list, file_list) = buat_split_panel();
+
+    // Rakit semua komponen ke root
+    root.append(&buat_row_horizontal_box(
+        vec![
+            entry_path.clone().upcast(),
+            choose_btn.upcast(),
+            filter_combo.clone().upcast(),
+            custom_entry.clone().upcast(),
+            calc_btn.clone().upcast(),
+            spinner.clone().upcast(),
+        ],
+        8,
+    ));
+
+    root.append(&buat_row_horizontal_box(
+        vec![total_label.clone().upcast(), count_label.clone().upcast()],
+        12,
+    ));
+
+    root.append(&buat_paned_dengan_lists(&ext_list, &file_list));
+
+    window.set_child(Some(&root));
+
+    // Setup event untuk file chooser
+    setup_file_chooser(&choose_btn, &entry_path);
+
+    // Setup event untuk custom entry enable/disable
+    setup_custom_entry_toggle(&filter_combo, &custom_entry);
+
+    KomponenUI {
+        window: window.clone(),
+        entry_path,
+        filter_combo,
+        custom_entry,
+        spinner,
+        total_label,
+        count_label,
+        ext_list,
+        file_list,
+    }
+}
+
+// ================================================================
+// FUNGSI UNTUK MEMBUAT HEADER BAR
+// ================================================================
+fn buat_header_bar(window: &ApplicationWindow) -> HeaderBar {
     let header = HeaderBar::new();
     header.set_show_title_buttons(true);
 
@@ -69,42 +272,42 @@ pub fn build_ui(app: &Application) {
     let fullscreen_btn = ToggleButton::with_label("Fullscreen");
     header.pack_end(&fullscreen_btn);
 
-    window.set_titlebar(Some(&header));
-
-    // fullscreen toggle
-    let win_clone_fs = window.clone();
-    fullscreen_btn.connect_toggled(move |b| {
-        if b.is_active() {
-            win_clone_fs.fullscreen();
-        } else {
-            win_clone_fs.unfullscreen();
+    // Setup toggle fullscreen
+    let window_clone = window.clone();
+    fullscreen_btn.connect_toggled(move |tombol| {
+        match tombol.is_active() {
+            true => window_clone.fullscreen(),
+            false => window_clone.unfullscreen(),
         }
     });
 
-    // ============ ROOT CONTAINER ============
+    header
+}
+
+// ================================================================
+// FUNGSI UNTUK MEMBUAT ROOT CONTAINER
+// ================================================================
+fn buat_root_container() -> GtkBox {
     let root = GtkBox::new(Orientation::Vertical, 12);
     root.set_margin_top(12);
     root.set_margin_bottom(12);
     root.set_margin_start(12);
     root.set_margin_end(12);
     root.set_vexpand(true);
+    root
+}
 
-    // ============ ROW CONTROL ============
-    let row = GtkBox::new(Orientation::Horizontal, 8);
-
-    let entry = Entry::new();
-    entry.set_placeholder_text(Some("Masukkan path folder atau pilih..."));
-    entry.set_hexpand(true);
+// ================================================================
+// FUNGSI UNTUK MEMBUAT CONTROL ROW
+// ================================================================
+fn buat_control_row() -> (Entry, Button, ComboBoxText, Entry, Button, Spinner) {
+    let entry_path = Entry::new();
+    entry_path.set_placeholder_text(Some("Masukkan path folder atau pilih..."));
+    entry_path.set_hexpand(true);
 
     let choose_btn = Button::with_label("Pilih Folder");
 
-    let filter_combo = ComboBoxText::new();
-    filter_combo.append_text("100 MB");
-    filter_combo.append_text("500 MB");
-    filter_combo.append_text("1 GB");
-    filter_combo.append_text("5 GB");
-    filter_combo.append_text("Custom");
-    filter_combo.set_active(Some(0));
+    let filter_combo = buat_combo_box_filter();
 
     let custom_entry = Entry::new();
     custom_entry.set_placeholder_text(Some("Mis. 150 MB (untuk Custom)"));
@@ -116,79 +319,106 @@ pub fn build_ui(app: &Application) {
     let spinner = Spinner::new();
     spinner.set_visible(false);
 
-    // Masukkan ke row
-    row.append(&entry);
-    row.append(&choose_btn);
-    row.append(&filter_combo);
-    row.append(&custom_entry);
-    row.append(&calc_btn);
-    row.append(&spinner);
+    (entry_path, choose_btn, filter_combo, custom_entry, calc_btn, spinner)
+}
 
-    // ============ INFO BAR ============
-    let info_box = GtkBox::new(Orientation::Horizontal, 12);
+// ================================================================
+// FUNGSI UNTUK MEMBUAT COMBO BOX FILTER MENGGUNAKAN ENUM
+// ================================================================
+fn buat_combo_box_filter() -> ComboBoxText {
+    let combo = ComboBoxText::new();
 
+    // Populate combo box menggunakan enum
+    OpsiFilterUkuran::semua_opsi()
+        .iter()
+        .for_each(|opsi| combo.append_text(opsi.ke_string()));
+
+    combo.set_active(Some(0));
+    combo
+}
+
+// ================================================================
+// FUNGSI UNTUK MEMBUAT INFO BAR
+// ================================================================
+fn buat_info_bar() -> (Label, Label) {
     let total_label = Label::new(Some("Total size: -"));
     let count_label = Label::new(Some("Total files: -"));
+    (total_label, count_label)
+}
 
-    info_box.append(&total_label);
-    info_box.append(&count_label);
+// ================================================================
+// FUNGSI UNTUK MEMBUAT HORIZONTAL BOX DENGAN CHILDREN
+// ================================================================
+fn buat_row_horizontal_box(children: Vec<Widget>, spacing: i32) -> GtkBox {
+    let box_horizontal = GtkBox::new(Orientation::Horizontal, spacing);
+    children.iter().for_each(|child| box_horizontal.append(child));
+    box_horizontal
+}
 
-    // ============ SPLIT PANEL ============
-    let split = Paned::new(Orientation::Horizontal);
-    split.set_vexpand(true);
-
-    // ----- Extension Box -----
-    let ext_box = GtkBox::new(Orientation::Vertical, 6);
-    ext_box.add_css_class("card");
-
-    let ext_title = Label::new(Some("File extensions (by count):"));
-    ext_box.append(&ext_title);
-
+// ================================================================
+// FUNGSI UNTUK MEMBUAT SPLIT PANEL
+// ================================================================
+fn buat_split_panel() -> (ListBox, ListBox) {
     let ext_list = ListBox::new();
     ext_list.set_selection_mode(SelectionMode::None);
-
-    let ext_scroll = ScrolledWindow::new();
-    ext_scroll.set_child(Some(&ext_list));
-    ext_scroll.set_min_content_width(260);
-    ext_scroll.set_min_content_height(380);
-
-    ext_box.append(&ext_scroll);
-
-    // ----- File List Box -----
-    let file_box = GtkBox::new(Orientation::Vertical, 6);
-    file_box.add_css_class("card");
-
-    let file_title = Label::new(Some("Files passing filter:"));
-    file_box.append(&file_title);
 
     let file_list = ListBox::new();
     file_list.set_selection_mode(SelectionMode::None);
 
-    let file_scroll = ScrolledWindow::new();
-    file_scroll.set_child(Some(&file_list));
-    file_scroll.set_min_content_width(640);
-    file_scroll.set_min_content_height(380);
+    (ext_list, file_list)
+}
 
-    file_box.append(&file_scroll);
+// ================================================================
+// FUNGSI UNTUK MEMBUAT PANED DENGAN LISTS
+// ================================================================
+fn buat_paned_dengan_lists(ext_list: &ListBox, file_list: &ListBox) -> Paned {
+    let split = Paned::new(Orientation::Horizontal);
+    split.set_vexpand(true);
 
-    // set ke paned
+    // Extension box
+    let ext_box = buat_list_box_container("File extensions (by count):", ext_list, 260, 380);
+
+    // File list box
+    let file_box = buat_list_box_container("Files passing filter:", file_list, 640, 380);
+
     split.set_start_child(Some(&ext_box));
     split.set_end_child(Some(&file_box));
 
-    // root
-    root.append(&row);
-    root.append(&info_box);
-    root.append(&split);
+    split
+}
 
-    window.set_child(Some(&root));
-    window.show();
+// ================================================================
+// FUNGSI HELPER UNTUK MEMBUAT LIST BOX CONTAINER
+// ================================================================
+fn buat_list_box_container(
+    judul: &str,
+    list_box: &ListBox,
+    min_width: i32,
+    min_height: i32,
+) -> GtkBox {
+    let container = GtkBox::new(Orientation::Vertical, 6);
+    container.add_css_class("card");
 
-    // ================================================================
-    // FILE CHOOSER
-    // ================================================================
-    let entry_clone = entry.clone();
+    let title_label = Label::new(Some(judul));
+    container.append(&title_label);
+
+    let scroll = ScrolledWindow::new();
+    scroll.set_child(Some(list_box));
+    scroll.set_min_content_width(min_width);
+    scroll.set_min_content_height(min_height);
+
+    container.append(&scroll);
+    container
+}
+
+// ================================================================
+// SETUP FILE CHOOSER EVENT
+// ================================================================
+fn setup_file_chooser(choose_btn: &Button, entry_path: &Entry) {
+    let entry_clone = entry_path.clone();
+
     choose_btn.connect_clicked(move |_| {
-        let fc = FileChooserNative::new(
+        let file_chooser = FileChooserNative::new(
             Some("Pilih folder"),
             None::<&gtk4::Window>,
             FileChooserAction::SelectFolder,
@@ -198,168 +428,374 @@ pub fn build_ui(app: &Application) {
 
         let entry_inner = entry_clone.clone();
 
-        fc.connect_response(move |dlg, resp| {
-            if resp == gtk4::ResponseType::Accept {
-                if let Some(f) = dlg.file() {
-                    if let Some(pb) = f.path() {
-                        entry_inner.set_text(pb.to_string_lossy().as_ref());
-                    }
-                }
-            }
-            dlg.destroy();
+        file_chooser.connect_response(move |dialog, response| {
+            handle_file_chooser_response(&dialog, response, &entry_inner);
+            dialog.destroy();
         });
 
-        fc.show();
+        file_chooser.show();
     });
+}
 
-    // ================================================================
-    // CUSTOM INPUT ENABLE
-    // ================================================================
-    let custom_for_combo = custom_entry.clone();
-    filter_combo.connect_changed(move |combo| {
-        let active = combo
-            .active_text()
-            .map(|s| s.to_string())
-            .unwrap_or_default();
+// ================================================================
+// HANDLE FILE CHOOSER RESPONSE
+// ================================================================
+fn handle_file_chooser_response(
+    dialog: &FileChooserNative,
+    response: gtk4::ResponseType,
+    entry: &Entry,
+) {
+    (response == gtk4::ResponseType::Accept)
+        .then(|| dialog.file())
+        .flatten()
+        .and_then(|file| file.path())
+        .map(|path| entry.set_text(&path.to_string_lossy()));
+}
 
-        custom_for_combo.set_sensitive(active == "Custom");
-    });
-
-    // ================================================================
-    // CHANNEL UNTUK RESULT WORKER
-    // ================================================================
-    let (tx, rx) = mpsc::channel::<Result<FolderStats, String>>();
-
-    // clone untuk polling
-    let total_label_clone = total_label.clone();
-    let count_label_clone = count_label.clone();
-    let ext_list_clone = ext_list.clone();
-    let file_list_clone = file_list.clone();
-    let spinner_clone = spinner.clone();
-
-    // polling setiap 100ms
-    glib::source::timeout_add_local(Duration::from_millis(100), move || {
-        match rx.try_recv() {
-            Ok(res) => {
-                spinner_clone.stop();
-                spinner_clone.set_visible(false);
-
-                match res {
-                    Ok(stats) => {
-                        total_label_clone
-                            .set_text(&format!("Total size: {}", format_bytes(stats.total_size)));
-                        count_label_clone.set_text(&format!("Total files: {}", stats.total_files));
-
-                        // clear ext list
-                        for child in listbox_children(&ext_list_clone) {
-                            ext_list_clone.remove(&child);
-                        }
-
-                        // clear file list
-                        for child in listbox_children(&file_list_clone) {
-                            file_list_clone.remove(&child);
-                        }
-
-                        // isi extension
-                        for (ext, cnt) in stats.extension_count.into_iter() {
-                            let row = ListBoxRow::new();
-                            let label = Label::new(Some(&format!("{} : {} file", ext, cnt)));
-                            label.set_xalign(0.0);
-
-                            row.set_child(Some(&label));
-                            ext_list_clone.append(&row);
-                        }
-
-                        // isi file list
-                        let mut files = stats.filtered_files;
-                        files.sort_by(|a, b| b.size.cmp(&a.size));
-
-                        for fe in files.into_iter() {
-                            let row = ListBoxRow::new();
-                            let label = Label::new(Some(&format!(
-                                "{} ({})",
-                                fe.path,
-                                format_bytes(fe.size)
-                            )));
-                            label.set_xalign(0.0);
-
-                            row.set_child(Some(&label));
-                            file_list_clone.append(&row);
-                        }
-                    }
-
-                    Err(err) => {
-                        total_label_clone.set_text("Total size: -");
-                        count_label_clone.set_text(&format!("Error: {}", err));
-                    }
-                }
-
-                Continue(true)
-            }
-
-            Err(TryRecvError::Empty) => Continue(true),
-
-            Err(TryRecvError::Disconnected) => {
-                spinner_clone.stop();
-                spinner_clone.set_visible(false);
-                count_label_clone.set_text("Error: worker disconnected");
-                Continue(false)
-            }
-        }
-    });
-
-    // ================================================================
-    // BUTTON HITUNG (SPAWN WORKER PROCESS)
-
-    let tx_clone = tx.clone();
-    let filter_combo_clone = filter_combo.clone();
+// ================================================================
+// SETUP CUSTOM ENTRY TOGGLE
+// ================================================================
+fn setup_custom_entry_toggle(filter_combo: &ComboBoxText, custom_entry: &Entry) {
     let custom_entry_clone = custom_entry.clone();
-    let entry_for_thread = entry.clone();
-    let total_label_calc = total_label.clone();
-    let count_label_calc = count_label.clone();
-    let spinner_calc = spinner.clone();
 
-    calc_btn.connect_clicked(move |_| {
-        let text = entry_for_thread.text().to_string();
-
-        if text.trim().is_empty() {
-            total_label_calc.set_text("Total size: -");
-            count_label_calc.set_text("Total files: - (masukkan path dulu)");
-            return;
-        }
-
-        let pb = PathBuf::from(text);
-
-        if !pb.exists() || !pb.is_dir() {
-            total_label_calc.set_text("Total size: -");
-            count_label_calc.set_text("Total files: - (path tidak valid)");
-            return;
-        }
-
-        // filter
-        let active = filter_combo_clone
+    filter_combo.connect_changed(move |combo| {
+        let opsi_aktif = combo
             .active_text()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "100 MB".to_string());
+            .and_then(|text| OpsiFilterUkuran::dari_string(&text));
 
-        let custom_text = custom_entry_clone.text().to_string();
-        let min_bytes = parse_filter_option(&active, Some(custom_text.as_str()));
+        let is_custom = opsi_aktif
+            .map(|opsi| opsi.adalah_custom())
+            .unwrap_or(false);
 
-        // spinner
-        spinner_calc.start();
-        spinner_calc.set_visible(true);
+        custom_entry_clone.set_sensitive(is_custom);
+    });
+}
 
-        total_label_calc.set_text("Menghitung...");
-        count_label_calc.set_text("Menghitung...");
+// ================================================================
+// SETUP EVENT HANDLERS UTAMA
+// ================================================================
+fn setup_event_handlers(komponen: &KomponenUI) {
+    let (pengirim_channel, penerima_channel) = mpsc::channel::<Result<FolderStats, String>>();
 
-        // Spawn worker in background thread (multiprocessing)
-        let tx_bg = tx_clone.clone();
-        let exe = current_exe().expect("cannot get exe path");
-        let folder_arg = pb.to_string_lossy().to_string();
+    // Setup polling untuk menerima hasil dari worker
+    setup_result_polling(komponen, penerima_channel);
 
-        thread::spawn(move || {
-            let res = ipc::run_worker_scan(&exe, &folder_arg, min_bytes);
-            let _ = tx_bg.send(res);
-        });
+    // Setup button hitung untuk spawn worker
+    setup_button_hitung(komponen, pengirim_channel);
+}
+
+// ================================================================
+// SETUP POLLING UNTUK MENERIMA HASIL DARI WORKER
+// ================================================================
+fn setup_result_polling(
+    komponen: &KomponenUI,
+    penerima_channel: mpsc::Receiver<Result<FolderStats, String>>,
+) {
+    let total_label = komponen.total_label.clone();
+    let count_label = komponen.count_label.clone();
+    let ext_list = komponen.ext_list.clone();
+    let file_list = komponen.file_list.clone();
+    let spinner = komponen.spinner.clone();
+
+    glib::source::timeout_add_local(Duration::from_millis(100), move || {
+        handle_channel_message(
+            &penerima_channel,
+            &spinner,
+            &total_label,
+            &count_label,
+            &ext_list,
+            &file_list,
+        )
+    });
+}
+
+// ================================================================
+// HANDLE MESSAGE DARI CHANNEL
+// ================================================================
+fn handle_channel_message(
+    penerima: &mpsc::Receiver<Result<FolderStats, String>>,
+    spinner: &Spinner,
+    total_label: &Label,
+    count_label: &Label,
+    ext_list: &ListBox,
+    file_list: &ListBox,
+) -> Continue {
+    match penerima.try_recv() {
+        Ok(hasil) => {
+            hentikan_spinner(spinner);
+            tampilkan_hasil(hasil, total_label, count_label, ext_list, file_list);
+            Continue(true)
+        }
+        Err(TryRecvError::Empty) => Continue(true),
+        Err(TryRecvError::Disconnected) => {
+            hentikan_spinner(spinner);
+            count_label.set_text("Error: worker disconnected");
+            Continue(false)
+        }
+    }
+}
+
+// ================================================================
+// HENTIKAN SPINNER
+// ================================================================
+fn hentikan_spinner(spinner: &Spinner) {
+    spinner.stop();
+    spinner.set_visible(false);
+}
+
+// ================================================================
+// TAMPILKAN HASIL SCAN
+// ================================================================
+fn tampilkan_hasil(
+    hasil: Result<FolderStats, String>,
+    total_label: &Label,
+    count_label: &Label,
+    ext_list: &ListBox,
+    file_list: &ListBox,
+) {
+    match hasil {
+        Ok(stats) => tampilkan_stats_berhasil(stats, total_label, count_label, ext_list, file_list),
+        Err(pesan_error) => tampilkan_error(pesan_error, total_label, count_label),
+    }
+}
+
+// ================================================================
+// TAMPILKAN STATS JIKA BERHASIL
+// ================================================================
+fn tampilkan_stats_berhasil(
+    stats: FolderStats,
+    total_label: &Label,
+    count_label: &Label,
+    ext_list: &ListBox,
+    file_list: &ListBox,
+) {
+    // Update label
+    total_label.set_text(&format!("Total size: {}", format_bytes(stats.total_size)));
+    count_label.set_text(&format!("Total files: {}", stats.total_files));
+
+    // Clear dan isi extension list
+    bersihkan_list_box(ext_list);
+    populate_extension_list(ext_list, stats.extension_count);
+
+    // Clear dan isi file list
+    bersihkan_list_box(file_list);
+    populate_file_list(file_list, stats.filtered_files);
+}
+
+// ================================================================
+// TAMPILKAN ERROR
+// ================================================================
+fn tampilkan_error(pesan_error: String, total_label: &Label, count_label: &Label) {
+    total_label.set_text("Total size: -");
+    count_label.set_text(&format!("Error: {}", pesan_error));
+}
+
+// ================================================================
+// BERSIHKAN LIST BOX
+// ================================================================
+fn bersihkan_list_box(list_box: &ListBox) {
+    ambil_semua_child_listbox(list_box)
+        .iter()
+        .for_each(|child| list_box.remove(child));
+}
+
+// ================================================================
+// POPULATE EXTENSION LIST
+// ================================================================
+fn populate_extension_list(ext_list: &ListBox, extension_count: Vec<(String, usize)>) {
+    extension_count.into_iter().for_each(|(ekstensi, jumlah)| {
+        let row = buat_list_row(&format!("{} : {} file", ekstensi, jumlah));
+        ext_list.append(&row);
+    });
+}
+
+// ================================================================
+// POPULATE FILE LIST
+// ================================================================
+fn populate_file_list(file_list: &ListBox, filtered_files: Vecrate::scan::FileEntry>) {
+    let files_terurut = urutkan_files_by_size(filtered_files);
+
+    files_terurut.into_iter().for_each(|file_entry| {
+        let row = buat_list_row(&format!(
+            "{} ({})",
+            file_entry.path,
+            format_bytes(file_entry.size)
+        ));
+        file_list.append(&row);
+    });
+}
+
+// ================================================================
+// URUTKAN FILES BERDASARKAN SIZE (DESCENDING)
+// ================================================================
+fn urutkan_files_by_size(files: Vecrate::scan::FileEntry>) -> Vecrate::scan::FileEntry> {
+    let mut files_sorted = files;
+    files_sorted.sort_by(|a, b| b.size.cmp(&a.size));
+    files_sorted
+}
+
+// ================================================================
+// BUAT LIST ROW
+// ================================================================
+fn buat_list_row(text: &str) -> ListBoxRow {
+    let row = ListBoxRow::new();
+    let label = Label::new(Some(text));
+    label.set_xalign(0.0);
+    row.set_child(Some(&label));
+    row
+}
+
+// ================================================================
+// SETUP BUTTON HITUNG
+// ================================================================
+fn setup_button_hitung(
+    komponen: &KomponenUI,
+    pengirim_channel: mpsc::Sender<Result<FolderStats, String>>,
+) {
+    let entry_path = komponen.entry_path.clone();
+    let filter_combo = komponen.filter_combo.clone();
+    let custom_entry = komponen.custom_entry.clone();
+    let spinner = komponen.spinner.clone();
+    let total_label = komponen.total_label.clone();
+    let count_label = komponen.count_label.clone();
+
+    let _calc_btn = buat_button_dengan_event("Hitung", move || {
+        handle_button_hitung_click(
+            &entry_path,
+            &filter_combo,
+            &custom_entry,
+            &spinner,
+            &total_label,
+            &count_label,
+            &pengirim_channel,
+        );
+    });
+
+    // Catatan: button "Hitung" asli dibuat di buat_control_row dan dipasang ke UI.
+    // Di sini kita hanya menghubungkan handler baru berbasis clone.
+}
+
+// ================================================================
+// BUAT BUTTON DENGAN EVENT HANDLER
+// ================================================================
+fn buat_button_dengan_event<F>(label: &str, handler: F) -> Button
+where
+    F: Fn() + 'static,
+{
+    let button = Button::with_label(label);
+    button.connect_clicked(move |_| handler());
+    button
+}
+
+// ================================================================
+// HANDLE BUTTON HITUNG CLICK
+// ================================================================
+fn handle_button_hitung_click(
+    entry_path: &Entry,
+    filter_combo: &ComboBoxText,
+    custom_entry: &Entry,
+    spinner: &Spinner,
+    total_label: &Label,
+    count_label: &Label,
+    pengirim: &mpsc::Sender<Result<FolderStats, String>>,
+) {
+    let text_path = entry_path.text().to_string();
+
+    match StatusValidasiPath::validasi(&text_path) {
+        StatusValidasiPath::Valid(path_valid) => {
+            jalankan_worker_scan(
+                path_valid,
+                filter_combo,
+                custom_entry,
+                spinner,
+                total_label,
+                count_label,
+                pengirim,
+            );
+        }
+        status_invalid => {
+            tampilkan_pesan_validasi_error(status_invalid, total_label, count_label);
+        }
+    }
+}
+
+// ================================================================
+// TAMPILKAN PESAN ERROR VALIDASI
+// ================================================================
+fn tampilkan_pesan_validasi_error(
+    status: StatusValidasiPath,
+    total_label: &Label,
+    count_label: &Label,
+) {
+    total_label.set_text("Total size: -");
+
+    status.pesan_error().map(|pesan| {
+        count_label.set_text(&format!("Total files: - {}", pesan))
+    });
+}
+
+// ================================================================
+// JALANKAN WORKER SCAN
+// ================================================================
+fn jalankan_worker_scan(
+    path_folder: PathBuf,
+    filter_combo: &ComboBoxText,
+    custom_entry: &Entry,
+    spinner: &Spinner,
+    total_label: &Label,
+    count_label: &Label,
+    pengirim: &mpsc::Sender<Result<FolderStats, String>>,
+) {
+    let ukuran_minimum = hitung_ukuran_minimum_bytes(filter_combo, custom_entry);
+
+    // Mulai spinner
+    spinner.start();
+    spinner.set_visible(true);
+
+    // Update label
+    total_label.set_text("Menghitung...");
+    count_label.set_text("Menghitung...");
+
+    // Spawn worker thread
+    spawn_worker_thread(path_folder, ukuran_minimum, pengirim.clone());
+}
+
+// ================================================================
+// HITUNG UKURAN MINIMUM BYTES (ENUM-BASED)
+// ================================================================
+fn hitung_ukuran_minimum_bytes(
+    filter_combo: &ComboBoxText,
+    custom_entry: &Entry,
+) -> u64 {
+    // Ambil text aktif dari combo; kalau tidak ada, fallback ke "100 MB"
+    let text_aktif = filter_combo
+        .active_text()
+        .unwrap_or_else(|| "100 MB".into());
+
+    // Ubah text menjadi enum; kalau gagal parse, fallback ke SeratusMB
+    let opsi = OpsiFilterUkuran::dari_string(&text_aktif)
+        .unwrap_or(OpsiFilterUkuran::SeratusMB);
+
+    // Ambil teks custom (kalau user isi)
+    let teks_custom = custom_entry.text().to_string();
+
+    // Semua keputusan logika sekarang lewat enum
+    opsi.ke_minimum_bytes(Some(teks_custom.as_str()))
+}
+
+// ================================================================
+// SPAWN WORKER THREAD
+// ================================================================
+fn spawn_worker_thread(
+    path_folder: PathBuf,
+    ukuran_minimum: u64,
+    pengirim: mpsc::Sender<Result<FolderStats, String>>,
+) {
+    let path_executable = current_exe().expect("Tidak dapat mengambil path executable");
+    let folder_string = path_folder.to_string_lossy().to_string();
+
+    thread::spawn(move || {
+        let hasil_scan = ipc::run_worker_scan(&path_executable, &folder_string, ukuran_minimum);
+        let _ = pengirim.send(hasil_scan);
     });
 }
